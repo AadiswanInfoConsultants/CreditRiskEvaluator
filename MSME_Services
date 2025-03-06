@@ -51,88 +51,43 @@ class ServicesScoring:
             },
             "Business Health & Risk Factors": {
                 "Business Vintage": [(10, float('inf'), 5), (7, 10, 4), (4, 7, 3), (2, 4, 2), (float('-inf'), 2, 1)],
-                "Customer Profile": [("Large Clients", 5), ("Mid-Sized Clients", 4), ("Mixed Clients", 3), ("Small Clients", 2), ("Unstable Clients", 1)],
-                "Industry Outlook": [("Strong Growth", 5), ("Moderate Growth", 4), ("Stable", 3), ("Declining", 2), ("Severe Decline", 1)],
+                "Customer Profile": {"Large Clients": 5, "Mid-Sized Clients": 4, "Mixed Clients": 3, "Small Clients": 2, "Unstable Clients": 1},
+                "Industry Outlook": {"Strong Growth": 5, "Moderate Growth": 4, "Stable": 3, "Declining": 2, "Severe Decline": 1},
                 "Altman Z-Score": [(3.0, float('inf'), 5), (2.5, 3.0, 4), (1.8, 2.5, 3), (1.0, 1.8, 2), (float('-inf'), 1.0, 1)]
             }
         }
 
-    def get_user_input(self):
-        #Get user input for company metrics.
-        company_scores = {}
-
-        for category, sub_metrics in self.submetric_weights.items():
-            print(f"\nEnter values for {category}:")
-            company_scores[category] = {}
-
-            for metric in sub_metrics.keys():
-                if metric in ["Customer Profile", "Industry Outlook"]:
-                    print(f"\nChoose an option for {metric}:")
-                    options = self.scoring_criteria[category][metric]
-                    for i, option in enumerate(options):
-                        print(f"{i + 1}. {option}")
-
-                    while True:
-                        choice = int(input(f"Enter choice (1-{len(options)}): "))
-                        if 1 <= choice <= len(options):
-                            company_scores[category][metric] = options[choice - 1]
-                            break
-                        else:
-                            print("Invalid choice. Please enter a valid number.")
-
-                else:
-                    while True:
-                        try:
-                            value = float(input(f"Enter value for {metric}: "))
-                            company_scores[category][metric] = value
-                            break
-                        except ValueError:
-                            print("Invalid input. Please enter a numeric value.")
-
-        return company_scores
-
     def score_metric(self, category, metric, value):
-        # Convert raw value into a score (1-5) based on predefined criteria.
         if metric in ["Customer Profile", "Industry Outlook"]:
-            return 5 - self.scoring_criteria[category][metric].index(value)
-
+            return self.scoring_criteria[category][metric].get(value, 1)
         for lower, upper, score in self.scoring_criteria[category][metric]:
             if lower <= value < upper:
                 return score
         return 1
 
     def compute_weighted_score(self, company_scores):
-        #Compute the final weighted AHP score for the given company.
         normalized_scores = {}
-
         for category, sub_metrics in self.submetric_weights.items():
             total_weight = sum(sub_metrics.values())
-            category_score = 0
-
-            for metric, weight in sub_metrics.items():
-                raw_value = company_scores[category][metric]
-                normalized_value = self.score_metric(category, metric, raw_value)
-                category_score += (normalized_value * (weight / total_weight))
-
+            category_score = sum(
+                self.score_metric(category, metric, company_scores[metric]) * (weight / total_weight)
+                for metric, weight in sub_metrics.items()
+            )
             normalized_scores[category] = category_score
-
-        final_score = sum(normalized_scores[category] * self.metric_weights[category] for category in normalized_scores)
-
+        final_score = sum(normalized_scores[cat] * self.metric_weights[cat] for cat in normalized_scores)
         return normalized_scores, final_score
 
+    def process_csv(self, file_path):
+        df = pd.read_csv(file_path)
+        results = []
+        for _, row in df.iterrows():
+            company_scores = row.to_dict()
+            category_scores, final_score = self.compute_weighted_score(company_scores)
+            results.append({"Company": company_scores.get("Company", "Unknown"), **category_scores, "Final Score": final_score})
+        return pd.DataFrame(results)
 
-# Instantiate the scoring system
 scoring_system = ServicesScoring()
-
-# Get user input for company scores
-company_scores = scoring_system.get_user_input()
-
-# Compute scores
-category_scores, final_ahp_score = scoring_system.compute_weighted_score(company_scores)
-
-# Display results
-print("\nFinal Weighted Scores by Category:")
-for category, score in category_scores.items():
-    print(f"{category}: {score:.2f}")
-
-print(f"\nFinal AHP Score: {final_ahp_score:.4f}")
+file_path = "/content/drive/MyDrive/data/dummy_company_data.csv"
+scored_df = scoring_system.process_csv(file_path)
+scored_df.to_csv("scored_output.csv", index=False)
+print(scored_df)
