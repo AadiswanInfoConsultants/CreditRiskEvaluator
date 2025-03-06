@@ -1,0 +1,139 @@
+import numpy as np
+import pandas as pd
+
+class ManufacturingScoring:
+    def __init__(self):
+        self.metric_weights = {
+            "Financial Metrics": 0.45,
+            "Banking & Creditworthiness": 0.30,
+            "Business Health & Risk Factors": 0.25
+        }
+
+        self.submetric_weights = {
+            "Financial Metrics": {
+                "Revenue Growth": 0.15,
+                "EBITDA Margin": 0.08,
+                "Receivables Turnover": 0.05,
+                "ROE": 0.10,
+                "ROCE": 0.12,
+                "DSO": 0.05
+            },
+            "Banking & Creditworthiness": {
+                "Quick Ratio": 0.05,
+                "Current Ratio": 0.06,
+                "D/E Ratio": 0.12,
+                "Interest Coverage": 0.05,
+                "DSR": 0.02
+            },
+            "Business Health & Risk Factors": {
+                "Business Vintage": 0.06,
+                "Customer Profile": 0.06,
+                "Industry Outlook": 0.05,
+                "Altman Z-Score": 0.08
+            }
+        }
+
+        self.scoring_criteria = {
+            "Financial Metrics": {
+                "Revenue Growth": [(15, float('inf'), 5), (10, 15, 4), (5, 10, 3), (2, 5, 2), (float('-inf'), 2, 1)],
+                "EBITDA Margin": [(15, float('inf'), 5), (10, 15, 4), (5, 10, 3), (3, 5, 2), (float('-inf'), 3, 1)],
+                "Receivables Turnover": [(8, float('inf'), 5), (6, 8, 4), (4, 6, 3), (2, 4, 2), (float('-inf'), 2, 1)],
+                "ROE": [(15, float('inf'), 5), (10, 15, 4), (6, 10, 3), (3, 6, 2), (float('-inf'), 3, 1)],
+                "ROCE": [(12, float('inf'), 5), (8, 12, 4), (6, 8, 3), (3, 6, 2), (float('-inf'), 3, 1)],
+                "DSO": [(float('-inf'), 30, 5), (30, 45, 4), (45, 60, 3), (60, 90, 2), (90, float('inf'), 1)]
+            },
+            "Banking & Creditworthiness": {
+                "Quick Ratio": [(2.5, float('inf'), 5), (2.0, 2.5, 4), (1.5, 2.0, 3), (1.2, 1.5, 2), (float('-inf'), 1.2, 1)],
+                "Current Ratio": [(2.0, float('inf'), 5), (1.5, 2.0, 4), (1.0, 1.5, 3), (0.8, 1.0, 2), (float('-inf'), 0.8, 1)],
+                "D/E Ratio": [(float('-inf'), 1.0, 5), (1.0, 2.0, 4), (2.0, 3.0, 3), (3.0, 4.0, 2), (4.0, float('inf'), 1)],
+                "Interest Coverage": [(4.0, float('inf'), 5), (2.5, 4.0, 4), (1.5, 2.5, 3), (1.0, 1.5, 2), (float('-inf'), 1.0, 1)],
+                "DSR": [(3.5, float('inf'), 5), (2.5, 3.5, 4), (1.5, 2.5, 3), (1.0, 1.5, 2), (float('-inf'), 1.0, 1)]
+            },
+            "Business Health & Risk Factors": {
+                "Business Vintage": [(10, float('inf'), 5), (7, 10, 4), (4, 7, 3), (2, 4, 2), (float('-inf'), 2, 1)],
+                "Customer Profile": [("Large Clients", 5), ("Mid-Sized Clients", 4), ("Mixed Clients", 3), ("Small Clients", 2), ("Unstable Clients", 1)],
+                "Industry Outlook": [("Strong Growth", 5), ("Moderate Growth", 4), ("Stable", 3), ("Declining", 2), ("Severe Decline", 1)],
+                "Altman Z-Score": [(3.0, float('inf'), 5), (2.5, 3.0, 4), (1.8, 2.5, 3), (1.0, 1.8, 2), (float('-inf'), 1.0, 1)]
+            }
+        }
+
+    def get_user_input(self):
+        #Get user input for company metrics.
+        company_scores = {}
+
+        for category, sub_metrics in self.submetric_weights.items():
+            print(f"\nEnter values for {category}:")
+            company_scores[category] = {}
+
+            for metric in sub_metrics.keys():
+                if metric in ["Customer Profile", "Industry Outlook"]:
+                    print(f"\nChoose an option for {metric}:")
+                    options = self.scoring_criteria[category][metric]
+                    for i, option in enumerate(options):
+                        print(f"{i + 1}. {option}")
+
+                    while True:
+                        choice = int(input(f"Enter choice (1-{len(options)}): "))
+                        if 1 <= choice <= len(options):
+                            company_scores[category][metric] = options[choice - 1]
+                            break
+                        else:
+                            print("Invalid choice. Please enter a valid number.")
+
+                else:
+                    while True:
+                        try:
+                            value = float(input(f"Enter value for {metric}: "))
+                            company_scores[category][metric] = value
+                            break
+                        except ValueError:
+                            print("Invalid input. Please enter a numeric value.")
+
+        return company_scores
+
+    def score_metric(self, category, metric, value):
+        # Convert raw value into a score (1-5) based on predefined criteria.
+        if metric in ["Customer Profile", "Industry Outlook"]:
+            return 5 - self.scoring_criteria[category][metric].index(value)
+
+        for lower, upper, score in self.scoring_criteria[category][metric]:
+            if lower <= value < upper:
+                return score
+        return 1
+
+    def compute_weighted_score(self, company_scores):
+        #Compute the final weighted AHP score for the given company.
+        normalized_scores = {}
+
+        for category, sub_metrics in self.submetric_weights.items():
+            total_weight = sum(sub_metrics.values())
+            category_score = 0
+
+            for metric, weight in sub_metrics.items():
+                raw_value = company_scores[category][metric]
+                normalized_value = self.score_metric(category, metric, raw_value)
+                category_score += (normalized_value * (weight / total_weight))
+
+            normalized_scores[category] = category_score
+
+        final_score = sum(normalized_scores[category] * self.metric_weights[category] for category in normalized_scores)
+
+        return normalized_scores, final_score
+
+
+# Instantiate the scoring system
+scoring_system = ManufacturingScoring()
+
+# Get user input for company scores
+company_scores = scoring_system.get_user_input()
+
+# Compute scores
+category_scores, final_ahp_score = scoring_system.compute_weighted_score(company_scores)
+
+# Display results
+print("\nFinal Weighted Scores by Category:")
+for category, score in category_scores.items():
+    print(f"{category}: {score:.2f}")
+
+print(f"\nFinal AHP Score: {final_ahp_score:.4f}")
+
