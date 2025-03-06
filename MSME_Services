@@ -79,8 +79,8 @@ class ServicesScoring:
         return df
 
 # Load data from CSV
-df = pd.read_csv("company_data.csv") #put your cv file here
+df = pd.read_csv("company_data.csv") #put your csv file here
 scoring_system = ServicesScoring()
 df = scoring_system.compute_weighted_score(df)
 df.to_csv("scored_companies.csv", index=False)
-print("Scoring complete. Results saved to scored_companies.csv.")
+print("Results saved to scored_companies.csv.")
