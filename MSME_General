@@ -1,16 +1,27 @@
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+from xgboost import XGBRegressor
+from sklearn.model_selection import LeaveOneOut, GridSearchCV, train_test_split
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.impute import KNNImputer
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.feature_selection import SelectKBest, f_regression
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import RandomizedSearchCV
 
-class MSMEScoring:
-    def __init__(self):
-        self.metric_weights = {
-            "Financial Metrics": 0.40,
-            "Banking & Creditworthiness": 0.35,
-            "Business Health & Risk Factors": 0.25
-        }
+# Define the weight dictionaries and scoring criteria (unchanged)
+metric_weights = {
+    "Financial Metrics": 0.40,
+    "Banking & Creditworthiness": 0.35,
+    "Business Health & Risk Factors": 0.25
+}
 
-        self.submetric_weights = {
-            "Financial Metrics": {
+submetric_weights = {
+    "Financial Metrics": {
                 "Revenue Growth": 0.12,
                 "EBITDA Margin": 0.07,
                 "Receivables Turnover": 0.02,
@@ -31,11 +42,11 @@ class MSMEScoring:
                 "Industry Outlook": 0.06,
                 "Altman Z-Score": 0.09
             }
-        }
+}
 
-        self.scoring_criteria = {
-            "Financial Metrics": {
-                "Revenue Growth": [(12, float('inf'), 5), (8, 12, 4), (5, 8, 3), (2, 5, 2), (float('-inf'), 2, 1)],
+scoring_criteria = {
+    "Financial Metrics": {
+                "Revenue Growth": [(12, float('inf'), 5), (8, 12, 4), (5, 8, 3), (2, 5, 2), (float('-inf'), 5, 1)],
                 "ROE": [(15, float('inf'), 5), (10, 15, 4), (6, 10, 3), (3, 6, 2), (float('-inf'), 3, 1)],
                 "ROCE": [(15, float('inf'), 5), (10, 15, 4), (6, 10, 3), (3, 6, 2), (float('-inf'), 3, 1)],
                 "EBITDA Margin": [(15, float('inf'), 5), (10, 15, 4), (5, 10, 3), (3, 5, 2), (float('-inf'), 3, 1)],
@@ -53,42 +64,509 @@ class MSMEScoring:
                 "Business Vintage": [(10, float('inf'), 5), (7, 10, 4), (4, 7, 3), (2, 4, 2), (float('-inf'), 2, 1)],
                 "Customer Profile": [("Large Clients", 5), ("Mid-Sized Clients", 4), ("Mixed Clients", 3), ("Small Clients", 2), ("Unstable Clients", 1)],
                 "Industry Outlook": [("Strong Growth", 5), ("Moderate Growth", 4), ("Stable", 3), ("Declining", 2), ("Severe Decline", 1)],
-                "Altman Z-Score": [(3.0, float('inf'), 5), (2.5, 3.0, 4), (1.8, 2.5, 3), (1.0, 1.8, 2), (float('-inf'), 1.0, 1)]
+                "Altman Z-Score": [(3.0, float('inf'), 5), (2.5, 3.0, 4), (1.8, 2.5, 3), (1.0, 1.8, 2), (float('-inf'), 1.0, 1)],
             }
-        }
+}
 
-    def score_metric(self, category, metric, value):
-        if metric in ["Customer Profile", "Industry Outlook"]:
-            return self.scoring_criteria[category][metric].get(value, 1)
-        for lower, upper, score in self.scoring_criteria[category][metric]:
-            if lower <= value < upper:
+# Mapping dictionaries for categorical variables
+categorical_mappings = {
+    "Customer Profile": {
+        "Large Clients": 5,
+        "Mid-Sized Clients": 4,
+        "Mixed Clients": 3,
+        "Small Clients": 2,
+        "Unstable Clients": 1
+    },
+    "Industry Outlook": {
+        "Strong Growth": 5,
+        "Moderate Growth": 4,
+        "Stable": 3,
+        "Declining": 2,
+        "Severe Decline": 1
+    }
+}
+
+# Define category metrics mapping
+category_metrics = {
+    "Financial Metrics": [
+        "revenue growth", "ebitda margin", "receivable turnover",
+        "roe", "roce", "dso"
+    ],
+    "Banking & Creditworthiness": [
+        "quick ratio", "current ratio", "d/e ratio",
+        "interest coverage ratio", "dsr"
+    ],
+    "Business Health & Risk Factors": [
+        "business vintage", "altman z score",
+        "customer profile", "industry outlook"
+    ]
+}
+
+# Create a mapping between column names and scoring criteria keys
+column_to_criteria_key = {
+    "revenue growth": "Revenue Growth",
+    "ebitda margin": "EBITDA Margin",
+    "receivable turnover": "Receivables Turnover",
+    "roe": "ROE",
+    "roce": "ROCE",
+    "dso": "DSO",
+    "quick ratio": "Quick Ratio",
+    "current ratio": "Current Ratio",
+    "d/e ratio": "D/E Ratio",
+    "interest coverage ratio": "Interest Coverage",
+    "dsr": "DSR",
+    "business vintage": "Business Vintage",
+    "altman z score": "Altman Z-Score",
+    "customer profile": "Customer Profile",
+    "industry outlook": "Industry Outlook"
+}
+
+def score_metric(category, metric, value):
+    """Score a metric based on its value and criteria."""
+    if pd.isna(value):
+        return 3  # Default middle score for missing values
+
+    # Map column name to criteria key
+    criteria_key = column_to_criteria_key.get(metric, metric)
+
+    # Handle categorical metrics
+    if criteria_key in ["Customer Profile", "Industry Outlook"]:
+        if isinstance(value, str):
+            # For string values, get the score from the dictionary
+            return scoring_criteria[category][criteria_key].get(value, 3)
+        else:
+            # If already numeric (mapped), return as is if in range 1-5
+            return min(5, max(1, int(value)))
+    # Handle numeric metrics
+    else:
+        try:
+            numeric_value = float(value)
+        except (ValueError, TypeError):
+            return 3  # Default to middle score for invalid values
+
+        for lower, upper, score in scoring_criteria[category][criteria_key]:
+            if lower <= numeric_value < upper:
                 return score
-        return 1
+        return 1  # Default lowest score if no criteria match
 
-    def compute_weighted_score(self, company_scores):
-        normalized_scores = {}
-        for category, sub_metrics in self.submetric_weights.items():
-            total_weight = sum(sub_metrics.values())
-            category_score = sum(
-                self.score_metric(category, metric, company_scores[metric]) * (weight / total_weight)
-                for metric, weight in sub_metrics.items()
-            )
-            normalized_scores[category] = category_score
-        final_score = sum(normalized_scores[cat] * self.metric_weights[cat] for cat in normalized_scores)
-        return normalized_scores, final_score
+def compute_ahp_score(row):
+    """Compute the AHP score for a row of data."""
+    total_score = 0
+    total_applied_weight = 0
 
-    def process_csv(self, file_path):
-        df = pd.read_csv(file_path)
-        results = []
-        for _, row in df.iterrows():
-            company_scores = row.to_dict()
-            category_scores, final_score = self.compute_weighted_score(company_scores)
-            results.append({"Company": company_scores.get("Company", "Unknown"), **category_scores, "Final Score": final_score})
-        return pd.DataFrame(results)
+    for category, category_weight in metric_weights.items():
+        category_score = 0
+        category_applied_weight = 0
+
+        for metric in category_metrics.get(category, []):
+            if metric in row.index and not pd.isna(row[metric]):
+                criteria_key = column_to_criteria_key.get(metric, metric)
+                metric_weight = submetric_weights[category].get(criteria_key, 0)
+
+                try:
+                    metric_score = score_metric(category, metric, row[metric])
+                    category_score += metric_score * metric_weight
+                    category_applied_weight += metric_weight
+                except Exception as e:
+                    continue
+
+        if category_applied_weight > 0:
+            normalized_category_score = category_score / category_applied_weight
+            total_score += normalized_category_score * category_weight
+            total_applied_weight += category_weight
+
+    return total_score / total_applied_weight if total_applied_weight > 0 else 3
+
+def clean_extreme_outliers(df, columns, threshold=5):
+    """Clean extreme outliers using IQR method with adjustable threshold."""
+    df_cleaned = df.copy()
+
+    for col in columns:
+        if col in df.columns and df[col].dtype != 'object':
+            q1 = df[col].quantile(0.25)
+            q3 = df[col].quantile(0.75)
+            iqr = q3 - q1
+
+            lower_bound = q1 - threshold * iqr
+            upper_bound = q3 + threshold * iqr
+
+            # Replace outliers with NaN
+            mask = (df[col] < lower_bound) | (df[col] > upper_bound)
+            if mask.any():
+                df_cleaned.loc[mask, col] = np.nan
+
+    return df_cleaned
 
 
-scoring_system = MSMEScoring()
-file_path = "/content/drive/MyDrive/data/dummy_company_data.csv"
-scored_df = scoring_system.process_csv(file_path)
-scored_df.to_csv("scored_output.csv", index=False)
-print(scored_df)
+
+def remove_high_correlation(df, threshold=0.95):
+    """Remove highly correlated features."""
+    corr_matrix = df.corr().abs()
+    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+
+    to_drop = [column for column in upper.columns if any(upper[column] > threshold)]
+    return df.drop(to_drop, axis=1)
+
+ddata_str = """Company Name\trevenue growth\tebitda margin\treceivable turnover\troe\troce\tdso\tquick ratio\tcurrent ratio\td/e ratio\tinterest coverage ratio\tdsr\tbusiness vintage\tAltman z score\tcustomer profile\tindustry outlook
+360 One Prime Ltd.\t32.91\t93.66\t0\t24.5\t14.5\tMissing\t0.21\t0.21\t4.51\t1.70\t1.16\t31\t2.09\tMid-Sized Clients\tModerate growth
+Dhyaani Tradeventtures Ltd\t221.4\t5.44\t0.98\t13.86\t16.89\t361.08\t1.26\t1.27\t0.61\t7.56\tMissing\t10\t1.35\tMid-Sized Clients\tStable
+Clinitech Laboratory Ltd\t1.9\t21.73\t9.04\t12.1\t14.8\t39.99\t1.49\t1.66\t0.24\t14.04\t1.2\t30\t7.3\tMid-Sized Clients\tStrong Growth
+Chandra Bhagat Pharma Ltd\t93.9\t2.17\t10.35\t5.42\t7.95\t60.6\t1.26\t1.9\t0.76\t2.63\t0.23\t21\t6.87\tMid-Sized Clients\tStrong Growth
+4D Corporation Pvt. Ltd.\t-5.22\t1.49\t5.27\t7.52\t7.52\t69.23\t2.11\t2.11\t0\t32\t27\t12\t5.91\tMid-Sized Clients\tModerate Growth
+4I Apps Solutions Pvt. Ltd.\t49.56\t25.43\t14.42\t54.35\t31.25\t25.31\t1.38\t1.38\t0.65\t22.22\t6.83\t17\t3.06\tMid-Sized Clients\tModerate Growth
+Acuite Ratings & Research Ltd.\t-2.71\t38.93\t1196\t15.71\t15.71\t0.31\t1.34\t1.34\t0\t1561\t1261\t20\t1.79\tMid-Sized Clients\tStable
+Adage Automation Pvt. Ltd.\t30.18\t14.27\t4.03\t29.67\t19.54\t90.67\t0.95\t1.63\t0.66\t6.55\t0.77\t24\t2.33\tMid-Sized Clients\tStable
+Accurate Meters Ltd.\t-82.89\t18.46\t0.44\t0.32\t0.25\t834.03\t0.16\t2.20\t0.16\t1.07\t1.47\t40\t0.79\tMid-Sized Clients\tStable
+Accurate Transformers Ltd.\t-5.49\t17.80\t1.27\t0.95\t0.24\t287.90\t0.98\t1.25\t3.02\t1.02\t0.18\t37\t1.39\tMid-Sized Clients\tStable
+Accuracy Shipping Ltd.\t-18.60\t4.80\t6.36\t0.40\t0.20\t57.38\t1.00\t1.41\t1.00\t1.03\t0.26\t17\t3.82\tMid-Sized Clients\tStable
+A N G Lifesciences India Ltd\t-39.03\t7.31\t1.77\t-8.71\t-5.10\t206.05\t0.61\t1.12\t0.77\t0.16\t0.17\t19\t0.69\tMid-Sized Clients\tStrong Growth
+Aakash Healthcare Pvt. Ltd.\t16.03\t14.47\t18.62\t24.34\t5.42\t19.60\t0.47\t0.54\t3.33\t59.39\t1.77\t31\t1.01\tMid-Sized Clients\tStrong Growth
+A V N Arogya Health Care Pvt. Ltd.\t32.46\t13.62\t82.58\t17.88\t13.61\t4.42\t0.37\t1.08\t0.25\t9.14\t6.84\t17\t3.49\tMid-Sized Clients\tStrong Growth
+1 To 1 Help.Net Pvt. Ltd.\t0.72\t29.25\t4.45\t53.95\t53.04\t82.03\t2.49\t2.50\t0.03\t87.40\t14.18\t24\t3.85\tMid-Sized Clients\tModerate Growth
+360 One Distribution Services Ltd.\t16.27\t24.44\t0\tMissing\t19.14\tMissing\t0.85\t0.85\t0.34\t3.96\t4.32\t30\t2.09\tMid-Sized Clients\tModerate growth"""
+
+def process_dataset():
+    """Process financial data and build the model."""
+    # Raw data string
+
+
+    # 1. Load and preprocess the data
+    rows = data_str.strip().split('\n')
+    headers = [h.strip().lower() for h in rows[0].split('\t')]
+
+    data = []
+    for row in rows[1:]:
+        values = row.split('\t')
+        row_dict = {headers[i]: values[i] for i in range(min(len(headers), len(values)))}
+        data.append(row_dict)
+
+    df = pd.DataFrame(data)
+
+    # 2. Clean and prepare data
+    special_values = ['Not Available', 'Not Applicable', 'Missing', 'Not applicable']
+    df = df.replace(special_values, np.nan)
+
+    # Clean numeric columns
+    for col in df.columns:
+        if col not in ['company name', 'customer profile', 'industry outlook']:
+            if df[col].dtype == 'object':
+                df[col] = df[col].str.replace('%', '', regex=False)
+                df[col] = df[col].str.replace('−', '-', regex=False)
+                df[col] = df[col].str.replace(',', '', regex=False)
+                df[col] = df[col].str.replace(' Years', '', regex=False)
+                df[col] = df[col].str.replace(' Year', '', regex=False)
+
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Check for and handle extreme outliers - likely to be a data entry error
+    numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+    df = clean_extreme_outliers(df, numeric_cols, threshold=10)
+
+    # Specifically check the revenue growth column for extreme values
+    if 'revenue growth' in df.columns:
+        # This handles the problematic 26,102.27 value (typo)
+        # Set a reasonable cap based on domain knowledge
+        reasonable_max = 100  # Assume max 100% growth
+        df.loc[df['revenue growth'] > reasonable_max, 'revenue growth'] = np.nan
+
+    # 3. Apply categorical mappings
+    for col, mapping in categorical_mappings.items():
+        col_lower = col.lower()
+        if col_lower in df.columns:
+            df[col_lower] = df[col_lower].map(lambda x: mapping.get(x, 3) if isinstance(x, str) else x)
+
+    # 4. Identify features for modeling
+    non_feature_cols = ['company', 'company name']
+    feature_cols = [col for col in df.columns if col.lower() not in non_feature_cols and col != 'ahp_score']
+
+    numeric_features = []
+    for col in feature_cols:
+        try:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            if df[col].notna().any():
+                numeric_features.append(col)
+        except:
+            continue
+
+    # 5. Calculate target AHP score
+    df['ahp_score'] = df.apply(compute_ahp_score, axis=1)
+
+    # 6. Create train and test sets
+    X = df[feature_cols].copy()
+    y = df['ahp_score'].copy()
+
+    # Handle missing values using KNN imputation
+    imputer = KNNImputer(n_neighbors=3)
+    X_imputed = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
+
+    # Remove highly correlated features
+    X_imputed = remove_high_correlation(X_imputed, threshold=0.95)
+
+    # Split into train and test sets
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_imputed, y, test_size=0.3, random_state=42
+    )
+
+    # 7. Feature preprocessing pipeline
+    numeric_transformer = Pipeline(steps=[
+        ('scaler', RobustScaler()),
+        ('selector', SelectKBest(f_regression, k=min(8, len(X_imputed.columns))))
+    ])
+
+    # 8. Model building and evaluation
+    model = XGBRegressor(
+        n_estimators=100,
+        learning_rate=0.05,
+        max_depth=3,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=42
+    )
+
+    # Train the model
+    model.fit(X_train, y_train)
+
+    # Evaluate the model
+    y_pred = model.predict(X_test)
+
+    # Calculate metrics
+    mse = mean_squared_error(y_test, y_pred)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_test, y_pred)
+    mae = mean_absolute_error(y_test, y_pred)
+
+    print(f"Model Performance:")
+    print(f"RMSE: {rmse:.4f}")
+    print(f"R2 Score: {r2:.4f}")
+    print(f"MAE: {mae:.4f}")
+
+    # 9. Feature importance analysis
+    feature_importance = model.feature_importances_
+    importance_df = pd.DataFrame({
+        'Feature': X_imputed.columns,
+        'Importance': feature_importance
+    }).sort_values('Importance', ascending=False)
+
+    print("\nFeature Importance:")
+    print(importance_df)
+
+    # 10. Alternative model comparison
+    # Try RandomForest as an alternative model
+    rf_model = RandomForestRegressor(
+        n_estimators=100,
+        max_depth=5,
+        random_state=42
+    )
+
+    rf_model.fit(X_train, y_train)
+    rf_pred = rf_model.predict(X_test)
+
+    rf_rmse = np.sqrt(mean_squared_error(y_test, rf_pred))
+    rf_r2 = r2_score(y_test, rf_pred)
+
+    print("\nRandom Forest Performance:")
+    print(f"RMSE: {rf_rmse:.4f}")
+    print(f"R2 Score: {rf_r2:.4f}")
+
+    # 11. Visualization of predicted vs actual values
+    plt.figure(figsize=(10, 6))
+    plt.scatter(y_test, y_pred, alpha=0.7)
+    plt.plot([min(y_test), max(y_test)], [min(y_test), max(y_test)], 'r--')
+    plt.xlabel('Actual AHP Score')
+    plt.ylabel('Predicted AHP Score')
+    plt.title('XGBoost: Actual vs Predicted AHP Scores')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    # 12. Hyperparameter tuning with cross-validation
+    param_grid = {
+        'n_estimators': [50, 100, 200],
+        'learning_rate': [0.01, 0.05, 0.1],
+        'max_depth': [2, 3, 4, 5],
+        'subsample': [0.7, 0.8, 0.9],
+        'colsample_bytree': [0.7, 0.8, 0.9]
+    }
+
+    # Fix the RandomizedSearchCV implementation
+    try:
+        random_search = RandomizedSearchCV(
+            estimator=XGBRegressor(random_state=42),
+            param_distributions=param_grid,
+            n_iter=10,  # Reduced from 20 to speed up execution
+            scoring='neg_mean_squared_error',
+            cv=3,  # Reduced from 5 to speed up execution
+            verbose=1,
+            random_state=42,
+            n_jobs=1  # Changed from -1 to avoid potential parallel processing issues
+        )
+
+        random_search.fit(X_imputed, y)
+
+        print("\nBest Hyperparameters:")
+        print(random_search.best_params_)
+        print(f"Best Cross-Validation Score (RMSE): {np.sqrt(-random_search.best_score_):.4f}")
+
+        # 13. Evaluate best model
+        best_model = random_search.best_estimator_
+        best_pred = best_model.predict(X_test)
+        best_rmse = np.sqrt(mean_squared_error(y_test, best_pred))
+        best_r2 = r2_score(y_test, best_pred)
+
+        print("\nTuned Model Performance:")
+        print(f"RMSE: {best_rmse:.4f}")
+        print(f"R2 Score: {best_r2:.4f}")
+    except Exception as e:
+        print(f"\nError during hyperparameter tuning: {str(e)}")
+        print("Using the base XGBoost model instead.")
+        best_model = model
+        best_rmse = rmse
+        best_r2 = r2
+
+    # 14. Save the best model
+    try:
+        import joblib
+        joblib.dump(best_model, 'healthcare_prediction_model.pkl')
+        print("\nModel saved as 'healthcare_prediction_model.pkl'")
+    except Exception as e:
+        print(f"\nError saving model: {str(e)}")
+
+    # 15. Function to predict AHP score for new companies
+    def predict_ahp_score(new_data):
+        """
+        Predict AHP score for new company data.
+
+        Parameters:
+        new_data (dict): Dictionary with company metrics as keys and values
+
+        Returns:
+        float: Predicted AHP score
+        """
+        # Convert to DataFrame
+        new_df = pd.DataFrame([new_data])
+
+        # Apply same preprocessing as training data
+        for col, mapping in categorical_mappings.items():
+            col_lower = col.lower()
+            if col_lower in new_df.columns:
+                new_df[col_lower] = new_df[col_lower].map(lambda x: mapping.get(x, 3) if isinstance(x, str) else x)
+
+        # Create a DataFrame with all original features for imputation
+        all_features_df = pd.DataFrame(columns=feature_cols)
+        for col in feature_cols:
+            if col in new_data:
+                all_features_df[col] = [new_data[col]]
+            else:
+                all_features_df[col] = [np.nan]
+
+        # Apply imputation to all features
+        all_features_imputed = pd.DataFrame(
+            imputer.transform(all_features_df),
+            columns=feature_cols
+        )
+
+        # Select only the filtered features used in the model
+        model_input = all_features_imputed[X_imputed.columns]
+
+        # Make prediction
+        prediction = best_model.predict(model_input)[0]
+
+        return prediction
+
+    # Store the feature columns used for prediction
+    feature_cols = [col for col in df.columns if col.lower() not in non_feature_cols and col != 'ahp_score']
+
+    return best_model, imputer, feature_cols, X_imputed.columns, predict_ahp_score
+if __name__ == "__main__":
+    model, imputer, all_features, model_features, predict_function = process_dataset()
+
+    # Get the original dataset
+    rows = data_str.strip().split('\n')
+    headers = [h.strip().lower() for h in rows[0].split('\t')]
+
+    data = []
+    for row in rows[1:]:
+        values = row.split('\t')
+        row_dict = {headers[i]: values[i] for i in range(min(len(headers), len(values)))}
+        data.append(row_dict)
+
+    df = pd.DataFrame(data)
+
+    # Clean and preprocess the same way as in process_dataset
+    special_values = ['Not Available', 'Not Applicable', 'Missing', 'Not applicable']
+    df = df.replace(special_values, np.nan)
+
+    # Clean numeric columns
+    for col in df.columns:
+        if col not in ['company name', 'customer profile', 'industry outlook']:
+            if df[col].dtype == 'object':
+                df[col] = df[col].str.replace('%', '', regex=False)
+                df[col] = df[col].str.replace('−', '-', regex=False)
+                df[col] = df[col].str.replace(',', '', regex=False)
+                df[col] = df[col].str.replace(' Years', '', regex=False)
+                df[col] = df[col].str.replace(' Year', '', regex=False)
+
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Apply categorical mappings
+    for col, mapping in categorical_mappings.items():
+        col_lower = col.lower()
+        if col_lower in df.columns:
+            df[col_lower] = df[col_lower].map(lambda x: mapping.get(x, 3) if isinstance(x, str) else x)
+
+    # Calculate actual AHP scores
+    df['actual_ahp_score'] = df.apply(compute_ahp_score, axis=1)
+
+    # Print model features to debug
+    print("\nAll features used for imputation:")
+    print(all_features)
+
+    print("\nModel features used for prediction:")
+    print(model_features)
+
+    print("\nColumns in the test dataframe:")
+    print(df.columns.tolist())
+
+    # Predict AHP scores for all companies
+    results = []
+    for idx, row in df.iterrows():
+        company_name = row['company name']
+
+        # Create company data dictionary with all available features
+        # Exclude 'actual_ahp_score' and 'company name' from the data
+        company_data = {}
+        for col in df.columns:
+            if col != 'actual_ahp_score' and col != 'company name':
+                company_data[col] = row[col]
+
+        try:
+            predicted_score = predict_function(company_data)
+            actual_score = row['actual_ahp_score']
+            results.append({
+                'Company': company_name,
+                'Predicted Score': predicted_score,
+                'Actual Score': actual_score,
+                'Difference': abs(predicted_score - actual_score)
+            })
+        except Exception as e:
+            print(f"Error predicting for {company_name}: {str(e)}")
+            # Print the keys in company_data for debugging
+            print(f"Company data keys: {list(company_data.keys())}")
+            continue
+
+    # Display results
+    if results:
+        results_df = pd.DataFrame(results)
+        print("\nPredictions for all companies in dataset:")
+        print(results_df)
+
+        # Calculate overall metrics
+        rmse = np.sqrt(mean_squared_error(results_df['Actual Score'], results_df['Predicted Score']))
+        r2 = r2_score(results_df['Actual Score'], results_df['Predicted Score'])
+        mae = mean_absolute_error(results_df['Actual Score'], results_df['Predicted Score'])
+
+        print(f"\nOverall Performance on Original Dataset:")
+        print(f"RMSE: {rmse:.4f}")
+        print(f"R2 Score: {r2:.4f}")
+        print(f"MAE: {mae:.4f}")
+    else:
+        print("\nNo valid predictions were made.")
